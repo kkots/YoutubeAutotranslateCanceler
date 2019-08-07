@@ -1,3 +1,4 @@
+
 // ==UserScript==
 // @name         Youtube Auto-translate Canceler
 // @namespace    https://github.com/pcouy/YoutubeAutotranslateCanceler/
@@ -38,7 +39,7 @@
 
     function getVideoID(a)
     {
-        while(a.tagName != " by removing the default check every second andA") a = a.parentNode;
+        while(a.tagName != "A") a = a.parentNode;
         return a.href.match (/(?:v=)([a-zA-Z0-9-_]{11})/)[1];
     }
 
@@ -55,6 +56,11 @@
         // MAIN TITLE - no API key required
         if (window.location.href.includes ("/watch")){
             var titleMatch = document.title.match (/^(?:\([0-9]+\) )?(.*?)(?: - YouTube)$/); // ("(n) ") + "TITLE - YouTube"
+            if (!titleMatch) {
+                console.log ("ERROR: Video is deleted!");
+                if (recheckTimer == -1) recheckTimer = setInterval(changeTitles, 1000);
+                return;
+            }
             var pageTitle = document.getElementsByClassName("title style-scope ytd-video-primary-info-renderer");
             if (pageTitle.length > 0 && pageTitle[0] !== undefined && titleMatch != null) {
                 if (pageTitle[0].innerText != titleMatch[1]){
@@ -93,7 +99,7 @@
 
         if(mainVidID != "" || videoIDElements.length > 0)
         { // Initiate API request
-            
+
             if (recheckTimer != -1) {
                 clearInterval(recheckTimer);
                 recheckTimer = -1;
@@ -194,7 +200,7 @@
             xhr.send();
         } else if (recheckTimer == -1) {
             // Finished initial or subsequent page loads and start checking once in a while
-            recheckTimer = setInterval(changeTitles, 1000)
+            recheckTimer = setInterval(changeTitles, 1000);
         }
     }
 
