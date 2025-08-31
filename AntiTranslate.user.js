@@ -1,4 +1,3 @@
-
 // ==UserScript==
 // @name         Youtube Auto-translate Canceler
 // @namespace    https://github.com/pcouy/YoutubeAutotranslateCanceler/
@@ -13,7 +12,9 @@
 
 (function() {
     'use strict';
-
+    // Original code:
+    // https://github.com/Seneral/YoutubeAutotranslateCanceler/blob/master/AntiTranslate.user.js
+    // This is a modified version of that code.
     /*
     Get a YouTube Data v3 API key from https://console.developers.google.com/apis/library/youtube.googleapis.com?q=YoutubeData
     */
@@ -33,9 +34,42 @@
     var cachedTitles = {} // Dictionary(id, title): Cache of API fetches, survives only Youtube Autoplay
 
     var currentLocation; // String: Current page URL
-    var changedDescription; // Bool: Changed description
+    var needChangeDescription;
+    var changedExpandedDescription = false; // Bool: Changed description
+    var changedSnippetDescription = false; // Bool: Changed description
+    var videoDescription; // Object: { snippet, expanded }. Snippet/expanded: String: video description obtained using API
+    var videoDescriptionFailed = false;
     var alreadyChanged; // List(string): Links already changed
+    var alreadyChangedDescriptions; // List(string): Links already changed
     var recheckTimer = -1; // Timer to recheck changes on the page AFTER initial load
+
+    function findDescription()
+    {
+        var pageDescriptionExpandedIterator = document.evaluate('//div[@id="description" and @class="item style-scope ytd-watch-metadata"]//div[@id="expanded"]//span[@class="yt-core-attributed-string yt-core-attributed-string--white-space-pre-wrap" and @dir="auto"]', document, null, 	XPathResult.ORDERED_NODE_ITERATOR_TYPE);
+        var pageDescriptionExpanded = pageDescriptionExpandedIterator.iterateNext();
+        var pageDescriptionSnippetIterator = document.evaluate('//div[@id="description" and @class="item style-scope ytd-watch-metadata"]//div[@id="snippet"]//span[@class="yt-core-attributed-string yt-core-attributed-string--white-space-pre-wrap" and @dir="auto"]', document, null, 	XPathResult.ORDERED_NODE_ITERATOR_TYPE);
+        var pageDescriptionSnippet = pageDescriptionSnippetIterator.iterateNext();
+        return { expanded: pageDescriptionExpanded, snippet: pageDescriptionSnippet };
+    }
+
+    function containsJapanese(s)
+    {
+        if (typeof s != "string") return false;
+        for (var c of s)  // iterate like this to handle surrogate pairs
+        {
+            var codePoint = c.codePointAt(0);
+            // CJK Symbols and Punctuation U+3000-U+30ff
+            // kanbun?? bopomofo?? inbetween
+            // CJK Unified Ideographs U+4E00 - U+9FFF
+            // Halfwidth and Fullwidth Forms U+FF00–FFEF
+            if (codePoint >= 0x3000 && codePoint <= 0x9FFF
+                || codePoint >= 0xFF00 && codePoint <= 0xFFEF)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     function getVideoID(a)
     {
@@ -46,8 +80,37 @@
     function resetChanged(){
         console.log(" --- Page Change detected! --- ");
         currentLocation = document.title;
-        changedDescription = false;
+        changedExpandedDescription = false;
+        changedSnippetDescription = false;
+        videoDescription = undefined;
+        videoDescriptionFailed = false;
         alreadyChanged = [];
+        alreadyChangedDescriptions = [];
+    }
+
+    function tryReplaceVideoDescription(description)
+    {
+        if (videoDescription === undefined
+            || changedSnippetDescription && changedExpandedDescription) return;
+
+        if (description === null)
+        {
+            description = findDescription();
+        }
+
+        if (description.snippet && !changedSnippetDescription)
+        {
+            changedSnippetDescription = true;
+            description.snippet.innerHTML = videoDescription.snippet;
+            console.log ("Reverting main video snippet description!");
+        }
+
+        if (description.expanded && !changedExpandedDescription)
+        {
+            changedExpandedDescription = true;
+            description.expanded.innerHTML = videoDescription.expanded;
+            console.log ("Reverting main video expanded description!");
+        }
     }
 
     function changeTitles(){
@@ -74,12 +137,47 @@
             return;
         }
 
-        var APIcallIDs;
-
-        // REFERENCED VIDEO TITLES - find video link elements in the page that have not yet been changed
-        var videoIDElements = Array.prototype.slice.call(document.querySelectorAll("#video-title")).filter(el => {
-            return el.className.includes("-video-") && alreadyChanged.indexOf(el) == -1;
-        } );
+        var videoIDElements = [];
+        if (window.location.href == "https://www.youtube.com/feed/subscriptions")
+        {
+            var titleNodeList = document.querySelectorAll("#video-title");
+            var descriptionNodeList = document.querySelectorAll("#description-text");
+            for (var i = 0; i < titleNodeList.length; ++i)
+            {
+                var titleNode = titleNodeList[i];
+                
+                var titleNodeAlreadyChanged = alreadyChanged.indexOf(titleNode) != -1;
+                
+                var descriptionNode = null;
+                if (i < descriptionNodeList.length)
+                {
+                    descriptionNode = descriptionNodeList[i];
+                    
+                    if (alreadyChangedDescriptions.indexOf(descriptionNode) != -1)
+                    {
+                        descriptionNode = null;
+                    }
+                }
+                
+                if (!titleNodeAlreadyChanged && containsJapanese(titleNode.title)
+                    || descriptionNode != null && containsJapanese(descriptionNode.innerText))
+                {
+                    videoIDElements.push({ title: titleNode, description: descriptionNode });
+                }
+                
+            }
+        } else {
+            var videoIDElementsIterator = document.evaluate('//h3[@class="yt-lockup-metadata-view-model__heading-reset"]/a/span',
+                document, null, XPathResult.ORDERED_NODE_ITERATOR_TYPE);
+            var videoIDElement;
+            while ((videoIDElement = videoIDElementsIterator.iterateNext()) && videoIDElement != null)
+            {
+                if (alreadyChanged.indexOf(videoIDElement) == -1 && containsJapanese(videoIDElement.innerText))
+                {
+                    videoIDElements.push({ title: videoIDElement, description: null });
+                }
+            }
+        }
 
 
         // Exclude list: Radio and Playlist Normal/Grid/Compact
@@ -93,8 +191,28 @@
 
          // MAIN VIDEO DESCRIPTION - request to load original video description
         var mainVidID = "";
-        if (!changedDescription && window.location.href.includes ("/watch")){
-            mainVidID = window.location.href.match (/(?:v=)([a-zA-Z0-9-_]{11})/)[1];
+        if (needChangeDescription !== false)
+        {
+            var descriptions = null;
+            if (needChangeDescription === undefined)
+            {
+                descriptions = findDescription();
+                needChangeDescription = descriptions.snippet && containsJapanese(descriptions.snippet.innerHTML)
+                        || descriptions.expanded && containsJapanese(descriptions.expanded.innerHTML);
+            }
+
+            if (needChangeDescription)
+            {
+                if (videoDescription === undefined)
+                {
+                    if (!videoDescriptionFailed && window.location.href.includes ("/watch"))
+                    {
+                        mainVidID = window.location.href.match (/(?:v=)([a-zA-Z0-9-_]{11})/)[1];
+                    }
+                } else {
+                    tryReplaceVideoDescription(descriptions);
+                }
+            }
         }
 
         if(mainVidID != "" || videoIDElements.length > 0)
@@ -106,7 +224,7 @@
             }
 
             // Get all videoIDs to put in the API request
-            var IDs = videoIDElements.map( a => getVideoID (a));
+            var IDs = videoIDElements.map( a => getVideoID (a.title));
             var APIFetchIDs = IDs.filter(id => cachedTitles[id] === undefined);
             if (mainVidID != "") APIFetchIDs.splice(0, 0, mainVidID); // Add main video ID
             var totalIDsToDo = APIFetchIDs.length; // Store total amount of IDs for debugging
@@ -131,54 +249,86 @@
 
                         if (mainVidID != "")
                         { // Replace Main Video Description
-                            var videoDescription = data[0].snippet.description;
-                            var pageDescription = document.getElementsByClassName("content style-scope ytd-video-secondary-info-renderer");
-                            if (pageDescription.length > 0 && videoDescription !== undefined && pageDescription[0] !== undefined) {
-                                // linkify replaces links correctly, but without redirect or other specific youtube stuff (no problem if missing)
-                                // Still critical, since it replaces ALL descriptions, even if it was not translated in the first place (no easy comparision possible)
-                                pageDescription[0].innerHTML = linkify(videoDescription);
-                                console.log ("Reverting main video description!");
+                            videoDescription = data[0].snippet.description;
+                            videoDescriptionFailed = videoDescription === undefined;
+                            if (!videoDescriptionFailed)
+                            {
+                                videoDescription = {
+                                    snippet: linkify(videoDescription.slice(0,100)),
+                                    expanded: linkify(videoDescription)
+                                };
+                                tryReplaceVideoDescription(null);
                             } else {
-                                console.log ("ERROR: Failed to find main video description! Skipping!", videoDescription, pageDescription);
+                                console.log ("ERROR: Failed to obtain main video description! Skipping!");
                             }
-                            changedDescription = true;
+                            //var pageDescription = document.getElementsByClassName("content style-scope ytd-video-secondary-info-renderer");
                         }
 
                         // Create dictionary for all IDs and their original titles
-                        data = data.forEach( v => {
-                            cachedTitles[v.id] = v.snippet.title;
+                        data.forEach( v => {
+                            cachedTitles[v.id] = v.snippet;
                         } );
 
                         // Change all previously found link elements
-                        for(var i=0 ; i < videoIDElements.length ; i++){
+                        for(var i = 0; i < videoIDElements.length; ++i){
                             var vidElement = videoIDElements[i];
-                            var curID = getVideoID(vidElement);
+                            var curID = getVideoID(vidElement.title);
                             if (curID !== IDs[i]) { // Can happen when Youtube was still loading when script was invoked
                                 console.log ("WARNING: YouTube replaced content while loading attempt has been made! Retrying in a second!");
-                                changedDescription = false; // Might not have been loaded aswell - fixes rare errors
+                                // Might not have been loaded aswell - fixes rare errors
+                                changedSnippetDescription = false;
+                                changedExpandedDescription = false;
                                 setTimeout(changeTitles, 1000);
                                 return;
                             }
-                            if (cachedTitles[curID] !== undefined)
+                            
+                            var cachedTitle = cachedTitles[curID];
+                            if (cachedTitle !== undefined)
                             {
-                                var originalTitle = cachedTitles[curID];
-                                var pageTitle = vidElement.innerText.trim();
-                                if(pageTitle != originalTitle.replace(/\s{2,}/g, ' '))
+                                
+                                if (alreadyChanged.indexOf(vidElement.title) == -1)
                                 {
-                                    console.log ("-- '" + curID + "': '" + pageTitle + "' --> '" + originalTitle + "'");
-                                    vidElement.innerText = originalTitle;
+                                    var originalTitle = cachedTitle.title;
+                                    var pageTitle = vidElement.title.innerText.trim();
+                                    if(pageTitle != originalTitle.replace(/\s{2,}/g, ' '))
+                                    {
+                                        console.log ("-- '" + curID + "': '" + pageTitle + "' --> '" + originalTitle + "'");
+                                        vidElement.title.innerText = originalTitle;
+                                    }
+                                    alreadyChanged.push(vidElement.title);
                                 }
-                                alreadyChanged.push(vidElement);
+                                
+                                if (vidElement.description != null)
+                                {
+                                    var originalDescription = cachedTitle.description;
+                                    var pageDescription = vidElement.description.innerText.trim();
+                                    if(pageDescription != originalDescription.replace(/\s{2,}/g, ' '))
+                                    {
+                                        console.log ("-- '" + curID + "' (desc): '" + pageDescription + "' --> '" + originalDescription + "'");
+                                        vidElement.description.innerText = originalDescription;
+                                    }
+                                    alreadyChangedDescriptions.push(vidElement.description);
+                                }
                             }
                             else if (APIFetchIDs.includes(curID))
                             { // Has been requested, but not been provided info about: Private or deleted video
-                                cachedTitles[curID] = vidElement.innerText.trim();
-                                alreadyChanged.push(vidElement);
+                                cachedTitles[curID] = {
+                                    title: vidElement.title.innerText.trim(),
+                                    description: vidElement.description != null ? vidElement.description.innerText.trim() : null
+                                };
+                                if (alreadyChanged.indexOf(vidElement.title) == -1)
+                                {
+                                    alreadyChanged.push(vidElement.title);
+                                }
+                                if (vidElement.description != null)
+                                {
+                                    alreadyChangedDescriptions.push(vidElement.description);
+                                }
                                 console.log ("-- '" + curID + "': private or deleted!");
                             }
                         }
                         // Call next iteration
-                        changeTitles();
+                        setTimeout(changeTitles, 1);
                     }
                     else
                     {
@@ -220,27 +370,30 @@
         replacePattern3 = /(([a-zA-Z0-9\-\_\.])+@[a-zA-Z\_]+?(\.[a-zA-Z]{2,6})+)/gim;
         replacedText = replacedText.replace(replacePattern3, '<a class="yt-simple-endpoint style-scope yt-formatted-string" spellcheck="false" href="mailto:$1">$1</a>');
 
-        //Change timestamps to clickable timestamp links.
-        // NOTE: NOT perfect, even with correct html code it will cause the page to reload whereas standard youtube timestamps will not. Probably some behind-the-scenes magic.
-        replacePattern4 = /([0-9]+:)?([0-9]+):([0-9]+)/gim;
-        replacedText = replacedText.replace(replacePattern4, function(match) {
+        if (false)
+        {
+            //Change timestamps to clickable timestamp links.
+            // NOTE: NOT perfect, even with correct html code it will cause the page to reload whereas standard youtube timestamps will not. Probably some behind-the-scenes magic.
+            replacePattern4 = /([0-9]+:)?([0-9]+):([0-9]+)/gim;
+            replacedText = replacedText.replace(replacePattern4, function(match) {
 
-            // Prepare time by calculating total seconds
-            var timeChars = match.split(':'); // Split by hour:minute:seconds
-            var time = parseInt(timeChars[0], 10) * 60 + parseInt(timeChars[1], 10); // Only minutes:seconds
-            if (timeChars.length >= 3)
-            { // Full hours:minutes:seconds
-                time = time * 60 + parseInt(timeChars[2], 10);
-            }
+                // Prepare time by calculating total seconds
+                var timeChars = match.split(':'); // Split by hour:minute:seconds
+                var time = parseInt(timeChars[0], 10) * 60 + parseInt(timeChars[1], 10); // Only minutes:seconds
+                if (timeChars.length >= 3)
+                { // Full hours:minutes:seconds
+                    time = time * 60 + parseInt(timeChars[2], 10);
+                }
 
-            // Prepare URL
-            var url = window.location.href; // Get current video URL
-            url = url.slice (url.indexOf("/watch?"), url.length); // Make it local
-            url = url.replace(/[?&]t=([0-9]+)s/, ""); // Remove existing timestamp
-            url = url + "&t=" + time + "s";
+                // Prepare URL
+                var url = window.location.href; // Get current video URL
+                url = url.slice (url.indexOf("/watch?"), url.length); // Make it local
+                url = url.replace(/[?&]t=([0-9]+)s/, ""); // Remove existing timestamp
+                url = url + "&t=" + time + "s";
 
-            return '<a class="yt-simple-endpoint style-scope yt-formatted-string" spellcheck="false" href="' + url + '">' + match + '</a>';
-        });
+                return '<a class="yt-simple-endpoint style-scope yt-formatted-string" spellcheck="false" href="' + url + '">' + match + '</a>';
+            });
+        }
 
         return replacedText;
     }
@@ -249,4 +402,3 @@
     // DOM listener would be good if it was not for the fact that Youtube changes its DOM frequently
     changeTitles();
 })();
-
