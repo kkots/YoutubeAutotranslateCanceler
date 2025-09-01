@@ -70,11 +70,17 @@
         }
         return false;
     }
-
+    
     function getVideoID(a)
     {
         while(a.tagName != "A") a = a.parentNode;
         return a.href.match (/(?:v=)([a-zA-Z0-9-_]{11})/)[1];
+    }
+
+    function getH3(a)
+    {
+        while(a.tagName != "H3") a = a.parentNode;
+        return a;
     }
 
     function resetChanged(){
@@ -162,7 +168,7 @@
                 if (!titleNodeAlreadyChanged && containsJapanese(titleNode.title)
                     || descriptionNode != null && containsJapanese(descriptionNode.innerText))
                 {
-                    videoIDElements.push({ title: titleNode, description: descriptionNode });
+                    videoIDElements.push({ title: titleNode, description: descriptionNode, h3: null });
                 }
                 
             }
@@ -174,7 +180,7 @@
             {
                 if (alreadyChanged.indexOf(videoIDElement) == -1 && containsJapanese(videoIDElement.innerText))
                 {
-                    videoIDElements.push({ title: videoIDElement, description: null });
+                    videoIDElements.push({ title: videoIDElement, description: null, h3: getH3(videoIDElement) });
                 }
             }
         }
@@ -247,7 +253,7 @@
 
                         data = data.items;
 
-                        if (mainVidID != "")
+                        if (mainVidID != "" && data.length > 0)
                         { // Replace Main Video Description
                             videoDescription = data[0].snippet.description;
                             videoDescriptionFailed = videoDescription === undefined;
@@ -296,6 +302,16 @@
                                         vidElement.title.innerText = originalTitle;
                                     }
                                     alreadyChanged.push(vidElement.title);
+                                    
+                                    if (vidElement.h3 != null)
+                                    {
+                                        var pageH3 = vidElement.h3.title.trim();
+                                        if(pageH3 != originalTitle.replace(/\s{2,}/g, ' '))
+                                        {
+                                            console.log ("-- '" + curID + "': '" + pageH3 + "' --> '" + originalTitle + "'");
+                                            vidElement.h3.title = originalTitle;
+                                        }
+                                    }
                                 }
                                 
                                 if (vidElement.description != null)
